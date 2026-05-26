@@ -4,7 +4,6 @@ import { getLevel } from './scoring.js';
 
 // ── Colors ──────────────────────────────────────────────
 const DIM_BAR = "\x1b[38;5;240m";
-const BAR_BG  = "\x1b[48;5;236m";
 const GOLD    = "\x1b[38;5;220m";
 const LIME    = "\x1b[38;5;82m";
 const SKY     = "\x1b[38;5;117m";
@@ -13,8 +12,26 @@ const PINK    = "\x1b[38;5;213m";
 const PURPLE  = "\x1b[38;5;183m";
 const TEAL    = "\x1b[38;5;123m";
 
-// Agent accent colors
 const AGENT_COLORS = [LIME, SKY, ORANGE, PINK, PURPLE, TEAL, GOLD];
+
+// ── Width helpers ───────────────────────────────────────
+// ANSI escape sequence matcher
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+
+function visLen(s) { return s.replace(ANSI_RE, '').length; }
+
+function padVis(s, targetLen, padRight = true) {
+  const cur = visLen(s);
+  const gap = targetLen - cur;
+  if (gap <= 0) return s;
+  return padRight ? s + ' '.repeat(gap) : ' '.repeat(gap) + s;
+}
+
+function truncVis(s, maxLen) {
+  if (visLen(s) <= maxLen) return s;
+  const raw = s.replace(ANSI_RE, '');
+  return raw.slice(0, maxLen - 1) + '…';
+}
 
 export function renderReport(results, asJson = false) {
   if (asJson) return renderJson(results);
@@ -52,6 +69,19 @@ function renderJson(results) {
   }, null, 2);
 }
 
+// ── Layout constants ────────────────────────────────────
+const INNER = 54;   // visible chars inside box borders
+const BOX_W = 58;   // ── chars for top/bottom border
+const PAD   = '  '; // left margin
+
+function boxTop(accent)    { return `${PAD}${accent}┌${BOX_H.repeat(BOX_W)}┐${W}`; }
+function boxMid(accent)    { return `${PAD}${accent}├${BOX_H.repeat(BOX_W)}┤${W}`; }
+function boxBot(accent)    { return `${PAD}${accent}└${BOX_H.repeat(BOX_W)}┘${W}`; }
+function boxRow(accent, content) {
+  const inner = padVis(content, INNER);
+  return `${PAD}${accent}│${W} ${inner} ${accent}│${W}`;
+}
+
 function renderTerminal(results) {
   const detected = results.filter(r => r.agent.detected);
   const scored = detected.filter(r => r.score);
@@ -65,20 +95,26 @@ function renderTerminal(results) {
 
   // ── Header ──────────────────────────────────────────
   L.push('');
-  L.push(`  ${B}╔${'═'.repeat(58)}╗${W}`);
-  L.push(`  ${B}║${W}                                                          ${B}║${W}`);
-  L.push(`  ${B}║${W}  ${G}⚡${W}  ${B}Coding Agent Proficiency Audit${W}                        ${B}║${W}`);
-  L.push(`  ${B}║${W}      ${D}${ts}  ·  local scan  ·  nothing uploaded${W}         ${B}║${W}`);
-  L.push(`  ${B}║${W}                                                          ${B}║${W}`);
-  L.push(`  ${B}╚${'═'.repeat(58)}╝${W}`);
+  L.push(`  ${B}╔${'═'.repeat(BOX_W)}╗${W}`);
+  L.push(`  ${B}║${W}${' '.repeat(BOX_W)}${B}║${W}`);
+  const title = `${G}⚡${W}  ${B}Coding Agent Proficiency Audit${W}`;
+  L.push(`  ${B}║${W}  ${padVis(title, BOX_W - 2)}${B}║${W}`);
+  const sub = `${D}${ts} · local scan · nothing uploaded${W}`;
+  L.push(`  ${B}║${W}      ${padVis(sub, BOX_W - 6)}${B}║${W}`);
+  L.push(`  ${B}║${W}${' '.repeat(BOX_W)}${B}║${W}`);
+  L.push(`  ${B}╚${'═'.repeat(BOX_W)}╝${W}`);
   L.push('');
 
   // ── Aggregate Score Hero ────────────────────────────
-  const barW = 50;
+  const barW = 40;
   const filled = Math.round(aggTotal / 100 * barW);
   const bar = gc + '█'.repeat(filled) + DIM_BAR + '░'.repeat(barW - filled) + W;
 
-  L.push(`  ${B}${gc}  ${aggGrade}${W}  ${B}${String(aggTotal).padStart(3)}/100${W}  ${bar}  ${B}${aggLevel}${W}`);
+  const heroLeft = `${B}${gc} ${aggGrade} ${String(aggTotal).padStart(3)}/100${W}`;
+  const heroRight = `${B}${aggLevel}${W}`;
+  const heroMid = visLen(bar);
+  const heroTotal = visLen(heroLeft) + 1 + heroMid + 1 + visLen(heroRight);
+  L.push(`  ${heroLeft} ${bar} ${heroRight}`);
 
   // Bonus line
   const bonusParts = [];
@@ -103,12 +139,15 @@ function renderTerminal(results) {
     const agc = gradeColor(ag);
     const accent = AGENT_COLORS[idx % AGENT_COLORS.length];
 
-    // Card header
-    L.push(`  ${accent}┌${BOX_H.repeat(58)}┐${W}`);
-    L.push(`  ${accent}│${W}  ${B}${r.agent.name.padEnd(20)}${W}  ${agc}${B}${ag}${W}  ${B}${String(s.total).padStart(3)}/100${W}  ${D}${al.padEnd(20)}${W}  ${accent}│${W}`);
-    L.push(`  ${accent}├${BOX_H.repeat(58)}┤${W}`);
+    L.push(boxTop(accent));
 
-    // Score dimensions as compact bar chart
+    // Header row: "Claude Code   A   89/100   Advanced User"
+    const hdr = `${B}${r.agent.name}${W}  ${agc}${B}${ag}${W}  ${B}${String(s.total).padStart(3)}/100${W}  ${D}${al}${W}`;
+    L.push(boxRow(accent, hdr));
+    L.push(boxMid(accent));
+
+    // Score bars: icon + label + bar + score
+    const barMax = 30;
     for (const [label, key, icon] of [
       ['Config', 'config', '⚙'],
       ['Volume', 'volume', '📊'],
@@ -116,14 +155,16 @@ function renderTerminal(results) {
       ['Workflow', 'sophistication', '⚡'],
     ]) {
       const v = s.scores[key];
-      const barLen = Math.round(v / 25 * 30);
+      const barLen = Math.round(v / 25 * barMax);
       const barColor = v >= 20 ? G : v >= 12 ? Y : v >= 5 ? ORANGE : R;
-      const dim = `${D}${'─'.repeat(30 - barLen)}${W}`;
-      const details = s.details[key].map(([d, p]) => `${G}+${p}${W}`).join(' ');
-      L.push(`  ${accent}│${W}  ${icon} ${label.padEnd(12)}${barColor}${'█'.repeat(barLen)}${dim}${W} ${String(v).padStart(2)}/25  ${D}${details}${W}  ${accent}│${W}`);
+      const filled2 = barColor + '█'.repeat(barLen) + W;
+      const empty2 = D + '░'.repeat(barMax - barLen) + W;
+      const scoreStr = `${String(v).padStart(2)}/25`;
+      const row = `${icon} ${label.padEnd(10)} ${filled2}${empty2} ${B}${scoreStr}${W}`;
+      L.push(boxRow(accent, row));
     }
 
-    // Quick stats row (fit within 54 inner chars)
+    // Stats row
     const ses = r.sessions || {};
     const stats = [];
     if (ses.sessionCount) stats.push(`${ses.sessionCount} ses`);
@@ -131,18 +172,17 @@ function renderTerminal(results) {
     if (ses.toolCalls) stats.push(`${fmtTok(ses.toolCalls)} calls`);
     if (setSize(ses.tools)) stats.push(`${setSize(ses.tools)} tools`);
     if (stats.length) {
-      const statLine = stats.join(' · ');
-      L.push(`  ${accent}│${W}  ${D}${statLine.padEnd(54)}${accent}│${W}`);
+      L.push(boxRow(accent, `${D}${stats.join(' · ')}${W}`));
     }
 
-    L.push(`  ${accent}└${BOX_H.repeat(58)}┘${W}`);
+    L.push(boxBot(accent));
     L.push('');
   }
 
-  // Low-score or detection-only agents (compact line)
+  // Low-score or detection-only agents
   const hidden = detected.filter(r => !visible.includes(r));
   if (hidden.length) {
-    const names = hidden.map(r => `${D}${r.agent.name}${W}`).join(`  ${D}·${W}  `);
+    const names = hidden.map(r => `${D}${r.agent.name}${W}`).join(` ${D}·${W} `);
     L.push(`  ${D}Also detected: ${names}${W}`);
     L.push('');
   }
@@ -171,23 +211,26 @@ function renderTerminal(results) {
   const aggAllt = aggAll.input + aggAll.output;
   const ad = Math.max(totalActiveDays, 1);
 
-  L.push(`  ${B}── Token Usage ──────────────────────────────────────────${W}`);
-  L.push(`  ${D}                                                    7d        30d         All${W}`);
+  const colW = 10;
+  L.push(`  ${B}── Token Usage ──────────────────────────────────────${W}`);
+  const hdr7 = '7d', hdr30 = '30d', hdrAll = 'All';
+  L.push(`  ${D}${' '.repeat(10)}${hdr7.padStart(colW)}${hdr30.padStart(colW)}${hdrAll.padStart(colW)}${W}`);
   for (const [label, k7, k30, ka] of [
-    ['  Input  ', agg7.input, agg30.input, aggAll.input],
-    ['  Output ', agg7.output, agg30.output, aggAll.output],
-    ['  Cache  ', agg7.cache, agg30.cache, aggAll.cache],
+    ['Input', agg7.input, agg30.input, aggAll.input],
+    ['Output', agg7.output, agg30.output, aggAll.output],
+    ['Cache', agg7.cache, agg30.cache, aggAll.cache],
   ]) {
-    L.push(`  ${D}${label}${W}  ${SKY}${fmtTok(k7).padStart(8)}${W}    ${GOLD}${fmtTok(k30).padStart(8)}${W}    ${LIME}${fmtTok(ka).padStart(9)}${W}`);
+    const row = `${D}${label.padEnd(8)}${W}${SKY}${fmtTok(k7).padStart(colW)}${W}${GOLD}${fmtTok(k30).padStart(colW)}${W}${LIME}${fmtTok(ka).padStart(colW)}${W}`;
+    L.push(`  ${row}`);
   }
-  L.push(`  ${D}  ${'─'.repeat(8)}    ${'─'.repeat(8)}    ${'─'.repeat(9)}${W}`);
-  L.push(`  ${B}  Total ${W}  ${SKY}${fmtTok(agg7t).padStart(8)}${W}    ${GOLD}${fmtTok(agg30t).padStart(8)}${W}    ${B}${fmtTok(aggAllt).padStart(9)}${W}`);
-  L.push(`  ${D}         ${fmtTok(agg30t / ad).padStart(8)}/day avg${W}`);
+  L.push(`  ${D}${'─'.repeat(8)}${'─'.repeat(colW)}${'─'.repeat(colW)}${'─'.repeat(colW)}${W}`);
+  L.push(`  ${B}Total${' '.repeat(3)}${W}${SKY}${fmtTok(agg7t).padStart(colW)}${W}${GOLD}${fmtTok(agg30t).padStart(colW)}${W}${B}${fmtTok(aggAllt).padStart(colW)}${W}`);
+  L.push(`  ${D}         ${fmtTok(agg30t / ad).padStart(colW)}/day avg${W}`);
   L.push('');
 
   // ── Usage Heatmap ───────────────────────────────────
   const maxH = Math.max(...aggHourly, 1);
-  L.push(`  ${B}── Activity Heatmap ─────────────────────────────────────${W}`);
+  L.push(`  ${B}── Activity Heatmap ─────────────────────────────────${W}`);
 
   for (const [start, ampm] of [[0, 'AM'], [12, 'PM']]) {
     let row = '  ';
@@ -204,7 +247,6 @@ function renderTerminal(results) {
     L.push(row);
   }
 
-  // Peak hours
   const topHours = aggHourly.map((v, i) => [v, i])
     .sort((a, b) => b[0] - a[0])
     .slice(0, 3)
@@ -215,7 +257,7 @@ function renderTerminal(results) {
   L.push('');
 
   // ── Details ─────────────────────────────────────────
-  L.push(`  ${B}── Details ──────────────────────────────────────────────${W}`);
+  L.push(`  ${B}── Details ────────────────────────────────────────────${W}`);
 
   const allTools = new Set();
   const allModels = new Set();
@@ -234,7 +276,8 @@ function renderTerminal(results) {
   L.push(`  ${C}Tool calls${W}    ${B}${totalCalls.toLocaleString()}${W}`);
   L.push(`  ${C}Unique tools${W}  ${B}${allTools.size}${W}`);
   if (allModels.size) {
-    L.push(`  ${C}Models${W}        ${B}${[...allModels].sort().slice(0, 6).join(', ')}${W}`);
+    const models = [...allModels].sort().slice(0, 4).join(', ');
+    L.push(`  ${C}Models${W}        ${B}${models}${W}`);
   }
   L.push('');
 
@@ -247,36 +290,29 @@ function renderTerminal(results) {
 }
 
 // ── Aggregate Scoring ─────────────────────────────────
-// Base = best agent score (you don't get penalized for trying new tools)
-// Bonuses: breadth, ecosystem depth, cross-tool usage
 function computeAggregate(detected) {
   const scored = detected.filter(r => r.score);
   if (!scored.length) return { total: 0, grade: 'F', level: 'Not a user', bonus: {} };
 
   const bonus = { breadth: 0, ecosystem: 0, crossTool: 0 };
 
-  // Base: BEST agent score
   const best = scored.reduce((a, b) => a.score.total > b.score.total ? a : b);
   let total = best.score.total;
 
-  // Breadth bonus: using multiple agents shows versatility
   const activeAgents = scored.filter(r => r.score.total >= 20).length;
   if (activeAgents >= 2) bonus.breadth = 3;
   if (activeAgents >= 3) bonus.breadth = 5;
   if (activeAgents >= 4) bonus.breadth = 7;
 
-  // Ecosystem bonus: advanced setup (custom skills + agents + MCP + hooks)
-  let hasSkills = 0, hasMcp = 0, hasHooks = 0, hasAgents = 0;
+  let hasSkills = 0, hasMcp = 0, hasHooks = 0;
   for (const r of scored) {
     if (r.config?.skills?.length >= 3) hasSkills++;
     if (r.config?.mcpServers?.length >= 1) hasMcp++;
     if (r.config?.hooks?.length >= 1) hasHooks++;
-    if (r.config?.agents?.length >= 1) hasAgents++;
   }
   if (hasSkills >= 2 && hasMcp >= 2) bonus.ecosystem = 3;
   if (hasSkills >= 2 && hasMcp >= 2 && hasHooks >= 1) bonus.ecosystem = 5;
 
-  // Cross-tool bonus: total token volume across agents
   let totalTokens = 0;
   for (const r of detected) {
     const t = r.sessions?.tokensAll;

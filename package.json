@@ -1,0 +1,26 @@
+{
+  "name": "agent-audit",
+  "version": "1.0.0",
+  "description": "Audit your coding agent proficiency — Claude Code, Codex CLI, Gemini CLI, and more",
+  "bin": {
+    "agent-audit": "./bin/agent-audit.js"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "keywords": [
+    "cli",
+    "audit",
+    "claude-code",
+    "codex",
+    "gemini",
+    "coding-agent",
+    "proficiency"
+  ],
+  "license": "MIT"
+}

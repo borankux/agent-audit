@@ -11,7 +11,7 @@ export const DIMENSIONS = [
   { id: 'security',       label: 'Security Hygiene',         icon: '🔒', weight: 10 },
 ];
 
-export function scoreAll(evidences) {
+export function scoreAll(evidences, sessions, powerScores) {
   const dimScores = {};
   for (const dim of DIMENSIONS) {
     dimScores[dim.id] = scoreDimension(dim.id, evidences);
@@ -35,7 +35,7 @@ export function scoreAll(evidences) {
     auraScore,
     confidence,
     dimensions: dimScores,
-    developerType: classifyDeveloper(dimScores, evidences),
+    developerType: classifyDeveloper(dimScores, evidences, sessions, powerScores),
   };
 }
 
@@ -224,31 +224,85 @@ function computeOverallConfidence(dimScores) {
   return 'low';
 }
 
-function classifyDeveloper(dimScores, evidences) {
+function classifyDeveloper(dimScores, evidences, sessions, powerScores) {
   const ai = dimScores.aiWorkflow?.score || 0;
   const env = dimScores.envHealth?.score || 0;
   const tc = dimScores.toolchainDepth?.score || 0;
   const ver = dimScores.verification?.score || 0;
   const auto = dimScores.automation?.score || 0;
+  const aiPower = powerScores?.aiPowerScore || 0;
 
   // Detect categories
   const aiAgents = evidences.filter(e => e.category === 'ai-agent' && e.depth !== 'detect');
+  const deepAgents = evidences.filter(e => e.category === 'ai-agent' && e.depth === 'deep');
   const runtimes = evidences.filter(e => e.category === 'runtime');
 
   const hasMultiAgent = aiAgents.length >= 3;
   const hasFullstack = runtimes.length >= 3;
-  const isAIHeavy = ai >= 70;
   const isTerminalHeavy = tc >= 60;
 
-  if (isAIHeavy && hasMultiAgent && hasFullstack) return { type: 'AI-Native Fullstack Builder', rank: getRank(ai) };
-  if (isAIHeavy && hasMultiAgent) return { type: 'Multi-Agent Orchestrator', rank: getRank(ai) };
-  if (isAIHeavy && isTerminalHeavy) return { type: 'AI-Powered Terminal Hacker', rank: getRank(ai) };
-  if (isAIHeavy) return { type: 'AI-Assisted Developer', rank: getRank(ai) };
-  if (hasFullstack && env >= 60) return { type: 'Fullstack Engineer', rank: getRank(env) };
-  if (auto >= 70) return { type: 'Automation Architect', rank: getRank(auto) };
-  if (ver >= 70) return { type: 'Quality-Focused Engineer', rank: getRank(ver) };
-  if (isTerminalHeavy) return { type: 'Toolchain Power User', rank: getRank(tc) };
-  return { type: 'Developer', rank: getRank(env) };
+  // Heavy user: any single agent meets threshold (tokens/sessions/toolCalls/activeDays)
+  const heavy = isAgentHeavy(evidences, sessions);
+
+  // AI identity is determined by actual usage, not dimension score
+  const isAIHeavy = heavy || ai >= 55 || aiPower >= 50;
+
+  // Primary agent detection for specialized titles
+  const primaryAgent = findPrimaryAgent(evidences, sessions);
+
+  if (isAIHeavy && hasMultiAgent && hasFullstack) return { type: 'AI-Native Fullstack Builder', rank: getRank(aiPower || ai), primaryAgent };
+  if (isAIHeavy && hasMultiAgent) return { type: 'Multi-Agent Orchestrator', rank: getRank(aiPower || ai), primaryAgent };
+  if (isAIHeavy && isTerminalHeavy) return { type: 'AI-Powered Terminal Hacker', rank: getRank(aiPower || ai), primaryAgent };
+  if (isAIHeavy && primaryAgent === 'claude-code') return { type: 'Claude Code Power User', rank: getRank(aiPower || ai), primaryAgent };
+  if (isAIHeavy && primaryAgent === 'codex') return { type: 'Codex Power User', rank: getRank(aiPower || ai), primaryAgent };
+  if (isAIHeavy) return { type: 'AI-Native Developer', rank: getRank(aiPower || ai), primaryAgent };
+  if (hasFullstack && env >= 60) return { type: 'Fullstack Engineer', rank: getRank(env), primaryAgent };
+  if (auto >= 70) return { type: 'Automation Architect', rank: getRank(auto), primaryAgent };
+  if (ver >= 70) return { type: 'Quality-Focused Engineer', rank: getRank(ver), primaryAgent };
+  if (isTerminalHeavy) return { type: 'Toolchain Power User', rank: getRank(tc), primaryAgent };
+  return { type: 'Developer', rank: getRank(env), primaryAgent };
+}
+
+function isAgentHeavy(evidences, sessions) {
+  if (sessions) {
+    for (const s of Object.values(sessions)) {
+      if (!s) continue;
+      const tokens = (s.tokensAll?.input || 0) + (s.tokensAll?.output || 0) + (s.tokensAll?.cache || 0);
+      if (tokens >= 10_000_000) return true;
+      if ((s.sessionCount || 0) >= 50) return true;
+      if ((s.toolCalls || 0) >= 500) return true;
+      if ((s.activeDays || 0) >= 15) return true;
+    }
+  }
+  const aiAgents = evidences.filter(e => e.category === 'ai-agent');
+  for (const ev of aiAgents) {
+    const m = ev.metrics || {};
+    if ((m.tokensUsed?.value || 0) >= 10_000_000) return true;
+    if ((m.aiSessions?.value || 0) >= 50) return true;
+    if ((m.toolCalls?.value || 0) >= 500) return true;
+    if ((m.activeDays?.value || 0) >= 15) return true;
+  }
+  return false;
+}
+
+function findPrimaryAgent(evidences, sessions) {
+  let best = null, bestTokens = 0;
+  if (sessions) {
+    for (const [name, s] of Object.entries(sessions)) {
+      if (!s) continue;
+      const t = (s.tokensAll?.input || 0) + (s.tokensAll?.output || 0) + (s.tokensAll?.cache || 0);
+      if (t > bestTokens) { bestTokens = t; best = name; }
+    }
+  }
+  if (!best) {
+    const deepAgents = evidences.filter(e => e.category === 'ai-agent' && e.depth === 'deep');
+    for (const ev of deepAgents) {
+      const m = ev.metrics || {};
+      const t = m.tokensUsed?.value || 0;
+      if (t > bestTokens) { bestTokens = t; best = ev.id; }
+    }
+  }
+  return best;
 }
 
 function getRank(score) {

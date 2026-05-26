@@ -3,7 +3,7 @@ export function parseArgs(argv = process.argv.slice(2)) {
   const args = { command: 'scan', mode: 'personal', format: 'terminal', flags: new Set() };
 
   // Parse commands
-  const commands = ['scan', 'report', 'card', 'team', 'compare', 'leaderboard'];
+  const commands = ['scan', 'report', 'card', 'team', 'compare', 'leaderboard', 'debug', 'discover'];
   const idx = argv.findIndex(a => commands.includes(a));
   if (idx >= 0) {
     args.command = argv[idx];
@@ -28,6 +28,9 @@ export function parseArgs(argv = process.argv.slice(2)) {
     if (a === '--save' || a === '-s')    { args.flags.add('save'); continue; }
     if (a === '--open')                  { args.flags.add('open'); continue; }
     if (a === '--redact')                { args.flags.add('redact'); continue; }
+    if (a === '--full')                  { args.flags.add('full'); args.maxLines = Infinity; continue; }
+    if (a === '--discover')              { return { ...args, command: 'discover' }; }
+    if (a === '--max-lines' && argv[i + 1]) { args.maxLines = parseInt(argv[++i], 10) || 800_000; continue; }
     if (a === '--explain-paths')         { args.flags.add('explainPaths'); return { ...args, command: 'explainPaths' }; }
     if (a === '--version' || a === '-v') { return { ...args, command: 'version' }; }
     if (a === '--help' || a === '-h')    { return { ...args, command: 'help' }; }
@@ -56,16 +59,21 @@ Usage:
   devaura scan --mode personal      Personal profile scan
   devaura scan --mode recruiter     Recruiter-safe report (redacted)
   devaura scan --mode security      Security hygiene check
+  devaura scan --mode power-user    Deep scan for AI power users
   devaura scan --mode team          Team collection mode (JSON output)
+  devaura scan --full               Full scan (no line limits)
+  devaura scan --discover           Detect all tools including unsupported
+  devaura debug claude-code         Debug Claude Code session parsing
   devaura report --html --open      Generate HTML report
   devaura card                      Generate share card (SVG)
-  devaura scan --json               JSON output
-  devaura scan --markdown           Markdown output
   devaura compare before.json after.json
 
 Options:
-  --mode <mode>      personal | recruiter | team | security
+  --mode <mode>      personal | recruiter | team | security | power-user
   --focus <focus>    ai | env | verification
+  --full             No line limit on session parsing
+  --discover         Detect all tools, show unsupported
+  --max-lines <n>    Custom line limit (default: 800000)
   --json             JSON output
   --html             HTML report
   --markdown         Markdown output
@@ -80,7 +88,10 @@ Options:
 Examples:
   npx devaura
   npx devaura scan --html --open
-  npx devaura scan --mode recruiter --redact --html
+  npx devaura scan --full --html --open
+  npx devaura scan --mode power-user --html
+  npx devaura debug claude-code
+  npx devaura scan --discover
   npx devaura card
 `.trim();
 }

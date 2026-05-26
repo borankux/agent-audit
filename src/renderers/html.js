@@ -10,31 +10,52 @@ const DIM_META = [
   { id: 'security',       label: 'Security',           icon: '🔒', color: '#fb7185' },
 ];
 
+const DEPTH_STYLES = {
+  deep:        { color: '#34d399', opacity: 1,    lineOpacity: 0.4, fontWeight: 600, glow: true  },
+  config:      { color: '#fbbf24', opacity: 0.8,  lineOpacity: 0.2, fontWeight: 400, glow: false },
+  detect:      { color: '#64748b', opacity: 0.5,  lineOpacity: 0.08, fontWeight: 400, glow: false },
+  unsupported: { color: '#fb7185', opacity: 0.6,  lineOpacity: 0.15, fontWeight: 400, glow: false },
+};
+
 export function renderHtml(report) {
-  const { auraScore, confidence, dimensions, developerType, badges, recommendations, evidences, sessions } = report;
+  const { auraScore, confidence, dimensions, developerType, powerScores, badges, recommendations, evidences, sessions, scanMeta } = report;
+  const ps = powerScores || {};
   const aiAgents = evidences.filter(e => e.category === 'ai-agent' && Object.values(e.metrics).some(m => m.status !== 'not_detected'));
   const runtimes = evidences.filter(e => e.category === 'runtime' && Object.values(e.metrics).some(m => m.status !== 'not_detected' && m.value));
   const infras = evidences.filter(e => e.category === 'infra' && Object.values(e.metrics).some(m => m.status !== 'not_detected' && m.value));
   const shells = evidences.filter(e => e.category === 'shell');
   const ides = evidences.filter(e => e.category === 'ide' && Object.values(e.metrics).some(m => m.status !== 'not_detected' && m.value));
+  const unsupported = evidences.filter(e => e.depth === 'unsupported');
 
-  // Token aggregation
-  let totalTokens = 0;
+  // Token aggregation — include cache tokens
+  let totalTokens = 0, totalInput = 0, totalOutput = 0, totalCacheRead = 0, totalCacheCreation = 0;
   const tokenByAgent = {};
+  const tokenDetailsByAgent = {};
   if (sessions) {
     for (const [name, s] of Object.entries(sessions)) {
-      if (s?.tokensAll) {
-        const t = (s.tokensAll.input || 0) + (s.tokensAll.output || 0);
-        if (t > 0) { totalTokens += t; tokenByAgent[name] = t; }
+      if (!s?.tokensAll) continue;
+      const inp = s.tokensAll.input || 0;
+      const out = s.tokensAll.output || 0;
+      const cr = s.tokensAll.cacheRead || s.tokensAll.cache || 0;
+      const cc = s.tokensAll.cacheCreation || 0;
+      const t = inp + out + cr + cc;
+      if (t > 0) {
+        totalTokens += t; totalInput += inp; totalOutput += out; totalCacheRead += cr; totalCacheCreation += cc;
+        tokenByAgent[name] = t;
+        tokenDetailsByAgent[name] = { input: inp, output: out, cacheRead: cr, cacheCreation: cc, totalBilled: s.tokensAll.totalBilled || t };
       }
     }
   }
 
   // Main weapon / secondary / weakness
-  const mainWeapon = aiAgents.length ? aiAgents[0].source : 'None';
-  const secondaryWeapon = aiAgents.length >= 2 ? aiAgents[1].source : null;
+  const deepAgents = aiAgents.filter(a => a.depth === 'deep');
+  const mainWeapon = deepAgents.length ? deepAgents[0].source : aiAgents.length ? aiAgents[0].source : 'None';
+  const secondaryWeapon = deepAgents.length >= 2 ? deepAgents[1].source : aiAgents.length >= 2 ? aiAgents[1].source : null;
   const weakness = findWeakness(dimensions);
   const specialSkill = badges.length ? badges[0].label : 'None';
+
+  // Truncation warning
+  const hasTruncation = scanMeta?.scannedAgents?.some(a => a.skipped);
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -47,6 +68,8 @@ export function renderHtml(report) {
 <body>
 <div class="page-bg"></div>
 <div class="container">
+
+  ${hasTruncation ? `<div class="warning-banner">⚠ Usage may be undercounted — session data was truncated. Run with <code>--full</code> for complete scan.</div>` : ''}
 
   <!-- ═══ HERO: Developer Identity Card ═══ -->
   <section class="hero-card">
@@ -61,6 +84,11 @@ export function renderHtml(report) {
         <div class="hero-meta">
           <span class="rank-pill">${esc(developerType.rank)}</span>
           <span class="hero-conf">Confidence: ${esc(confidence)}</span>
+        </div>
+        <div class="hero-scores">
+          <div class="score-pill aura"><span class="sp-val">${auraScore}</span><span class="sp-label">Aura Score</span></div>
+          ${ps.aiPowerScore !== undefined ? `<div class="score-pill power"><span class="sp-val">${ps.aiPowerScore}</span><span class="sp-label">AI Power</span></div>` : ''}
+          ${ps.primaryAgentPowerScore?.score ? `<div class="score-pill agent"><span class="sp-val">${ps.primaryAgentPowerScore.score}</span><span class="sp-label">${esc(ps.primaryAgentPowerScore.agent || 'Agent')} Power</span></div>` : ''}
         </div>
         <div class="hero-weapons">
           <div class="weapon"><span class="weapon-label">Main Weapon</span><span class="weapon-val">${esc(mainWeapon)}</span></div>
@@ -105,7 +133,14 @@ export function renderHtml(report) {
   <section class="card">
     <div class="card-header"><span class="card-dot" style="background:#8b5cf6"></span>AI Agent Constellation</div>
     ${agentConstellation(aiAgents)}
+    ${unsupported.length ? `<div class="unsupported-list">
+      <div class="card-header" style="margin-top:16px"><span class="card-dot" style="background:#fb7185"></span>Detected but Unsupported</div>
+      ${unsupported.map(a => `<div class="unsupported-item"><span class="ui-name">${esc(a.source)}</span><span class="ui-badge">Not included in score</span></div>`).join('')}
+    </div>` : ''}
   </section>
+
+  <!-- ═══ POWER USER EVIDENCE ═══ -->
+  ${renderPowerUserEvidence(sessions, evidences)}
 
   <!-- ═══ TOOLCHAIN MAP ═══ -->
   <section class="section-grid">
@@ -122,20 +157,7 @@ export function renderHtml(report) {
         ${stackGroup('Shell', shells.flatMap(e => e.metrics?.shellPlugins?.evidence || []).slice(0, 6))}
       </div>
     </div>
-    ${totalTokens > 0 ? `<div class="card">
-      <div class="card-header"><span class="card-dot" style="background:#f97316"></span>Token Usage</div>
-      <div class="token-chart">
-        <div class="token-total"><span class="token-big">${fmtTok(totalTokens)}</span><span class="token-label">Total tokens</span></div>
-        ${Object.entries(tokenByAgent).map(([name, val]) => {
-          const pct = Math.round(val / totalTokens * 100);
-          return `<div class="token-row">
-            <span class="token-name">${esc(name)}</span>
-            <div class="token-bar-bg"><div class="token-bar-fill" style="width:${pct}%"></div></div>
-            <span class="token-val">${fmtTok(val)}</span>
-          </div>`;
-        }).join('')}
-      </div>
-    </div>` : ''}
+    ${totalTokens > 0 ? tokenBreakdownCard(tokenDetailsByAgent, totalTokens, totalInput, totalOutput, totalCacheRead, totalCacheCreation) : ''}
   </section>
 
   <!-- ═══ BADGE WALL ═══ -->
@@ -161,6 +183,166 @@ export function renderHtml(report) {
 </body>
 </html>`;
   return html;
+}
+
+// ── Power User Evidence Section ──────────────────
+function renderPowerUserEvidence(sessions, evidences) {
+  if (!sessions || !Object.keys(sessions).length) return '';
+
+  // Aggregate all session data
+  const agg = { sessions: 0, activeDays: 0, first: null, last: null, fileEdits: 0, commandRuns: 0, testCommands: 0, buildCommands: 0, lintCommands: 0, typecheckCommands: 0, toolCalls: 0, tools: new Set(), skills: new Set(), agentTypes: new Set(), mcpServers: new Set(), models: new Set() };
+  const tok = { '7d': { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, '30d': { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, all: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, totalBilled: 0, totalContext: 0 } };
+  const hourlyAgg = new Array(24).fill(0);
+  const dailyAgg = {};
+
+  for (const s of Object.values(sessions)) {
+    if (!s) continue;
+    agg.sessions += s.sessionCount || 0;
+    agg.activeDays += s.activeDays || 0;
+    agg.fileEdits += s.fileEdits || 0;
+    agg.commandRuns += s.commandRuns || 0;
+    agg.testCommands += s.testCommands || 0;
+    agg.buildCommands += s.buildCommands || 0;
+    agg.lintCommands += s.lintCommands || 0;
+    agg.typecheckCommands += s.typecheckCommands || 0;
+    agg.toolCalls += s.toolCalls || 0;
+    if (s.first && (!agg.first || s.first < agg.first)) agg.first = s.first;
+    if (s.last && (!agg.last || s.last > agg.last)) agg.last = s.last;
+    for (const t of (s.tools || [])) agg.tools.add(t);
+    for (const sk of (s.skills || [])) agg.skills.add(sk);
+    for (const at of (s.agentTypes || [])) agg.agentTypes.add(at);
+    for (const m of (s.mcpServers || [])) agg.mcpServers.add(m);
+    for (const m of (s.models || [])) agg.models.add(m);
+
+    for (const p of ['7d', '30d', 'all']) {
+      const sk = p === '7d' ? s.tokens7d : p === '30d' ? s.tokens30d : s.tokensAll;
+      if (!sk) continue;
+      tok[p].input += sk.input || 0;
+      tok[p].output += sk.output || 0;
+      tok[p].cacheRead += sk.cacheRead || sk.cache || 0;
+      tok[p].cacheCreation += sk.cacheCreation || 0;
+    }
+    tok.all.totalBilled += s.tokensAll?.totalBilled || 0;
+    tok.all.totalContext += s.tokensAll?.totalContext || 0;
+
+    if (s.hourlyCounts) for (let i = 0; i < 24; i++) hourlyAgg[i] += s.hourlyCounts[i] || 0;
+    if (s.dailyTokens) for (const [d, v] of Object.entries(s.dailyTokens)) dailyAgg[d] = (dailyAgg[d] || 0) + v;
+  }
+
+  const totalAll = tok.all.input + tok.all.output + tok.all.cacheRead + tok.all.cacheCreation;
+
+  // Hourly heatmap
+  const maxH = Math.max(...hourlyAgg, 1);
+  const heatmapSvg = renderHeatmap(hourlyAgg, maxH);
+
+  // Daily chart (last 30 days)
+  const dailyChart = renderDailyChart(dailyAgg);
+
+  return `<section class="card">
+    <div class="card-header"><span class="card-dot" style="background:#8b5cf6"></span>Power User Evidence</div>
+    <div class="evidence-grid">
+      <div class="ev-item"><span class="ev-label">Sessions</span><span class="ev-val">${fmtTok(agg.sessions)}</span></div>
+      <div class="ev-item"><span class="ev-label">Active Days</span><span class="ev-val">${agg.activeDays}</span></div>
+      <div class="ev-item"><span class="ev-label">First Active</span><span class="ev-val">${agg.first || '—'}</span></div>
+      <div class="ev-item"><span class="ev-label">Last Active</span><span class="ev-val">${agg.last || '—'}</span></div>
+      <div class="ev-item"><span class="ev-label">Tool Calls</span><span class="ev-val">${fmtTok(agg.toolCalls)}</span></div>
+      <div class="ev-item"><span class="ev-label">Unique Tools</span><span class="ev-val">${agg.tools.size}</span></div>
+      <div class="ev-item"><span class="ev-label">File Edits</span><span class="ev-val">${fmtTok(agg.fileEdits)}</span></div>
+      <div class="ev-item"><span class="ev-label">Command Runs</span><span class="ev-val">${fmtTok(agg.commandRuns)}</span></div>
+      <div class="ev-item"><span class="ev-label">Test Commands</span><span class="ev-val">${agg.testCommands}</span></div>
+      <div class="ev-item"><span class="ev-label">Build Commands</span><span class="ev-val">${agg.buildCommands}</span></div>
+      <div class="ev-item"><span class="ev-label">Lint Commands</span><span class="ev-val">${agg.lintCommands}</span></div>
+      <div class="ev-item"><span class="ev-label">Typecheck</span><span class="ev-val">${agg.typecheckCommands}</span></div>
+      <div class="ev-item"><span class="ev-label">Skills Invoked</span><span class="ev-val">${agg.skills.size}</span></div>
+      <div class="ev-item"><span class="ev-label">Agent Types</span><span class="ev-val">${agg.agentTypes.size}</span></div>
+      <div class="ev-item"><span class="ev-label">MCP Servers</span><span class="ev-val">${agg.mcpServers.size}</span></div>
+      <div class="ev-item"><span class="ev-label">Models Used</span><span class="ev-val">${agg.models.size}</span></div>
+    </div>
+
+    <div class="token-periods">
+      <div class="tp-header"><span class="tp-period">Period</span><span class="tp-col">Input</span><span class="tp-col">Output</span><span class="tp-col">Cache Read</span><span class="tp-col">Cache Write</span><span class="tp-col">Total</span></div>
+      <div class="tp-row"><span class="tp-period">7d</span><span class="tp-col">${fmtTok(tok['7d'].input)}</span><span class="tp-col">${fmtTok(tok['7d'].output)}</span><span class="tp-col">${fmtTok(tok['7d'].cacheRead)}</span><span class="tp-col">${fmtTok(tok['7d'].cacheCreation)}</span><span class="tp-col tp-total">${fmtTok(tok['7d'].input + tok['7d'].output + tok['7d'].cacheRead + tok['7d'].cacheCreation)}</span></div>
+      <div class="tp-row"><span class="tp-period">30d</span><span class="tp-col">${fmtTok(tok['30d'].input)}</span><span class="tp-col">${fmtTok(tok['30d'].output)}</span><span class="tp-col">${fmtTok(tok['30d'].cacheRead)}</span><span class="tp-col">${fmtTok(tok['30d'].cacheCreation)}</span><span class="tp-col tp-total">${fmtTok(tok['30d'].input + tok['30d'].output + tok['30d'].cacheRead + tok['30d'].cacheCreation)}</span></div>
+      <div class="tp-row tp-all"><span class="tp-period">All</span><span class="tp-col">${fmtTok(tok.all.input)}</span><span class="tp-col">${fmtTok(tok.all.output)}</span><span class="tp-col">${fmtTok(tok.all.cacheRead)}</span><span class="tp-col">${fmtTok(tok.all.cacheCreation)}</span><span class="tp-col tp-total">${fmtTok(totalAll)}</span></div>
+      ${tok.all.totalBilled ? `<div class="tp-row"><span class="tp-period">Billed</span><span class="tp-col" colspan="4"></span><span class="tp-col tp-total">${fmtTok(tok.all.totalBilled)}</span></div>` : ''}
+      ${tok.all.totalContext ? `<div class="tp-row"><span class="tp-period">Context</span><span class="tp-col" colspan="4"></span><span class="tp-col tp-total">${fmtTok(tok.all.totalContext)}</span></div>` : ''}
+    </div>
+
+    ${heatmapSvg}
+
+    ${dailyChart}
+
+    ${agg.models.size ? `<div class="models-section"><span class="ev-label">Models:</span> ${[...agg.models].map(m => `<span class="stack-chip">${esc(m)}</span>`).join('')}</div>` : ''}
+  </section>`;
+}
+
+function renderHeatmap(hourlyAgg, maxH) {
+  if (maxH <= 1) return '';
+  const rows = [];
+  for (const [start, label] of [[0, 'AM'], [12, 'PM']]) {
+    let cells = '';
+    for (let h = start; h < start + 12; h++) {
+      const pct = hourlyAgg[h] / maxH;
+      let fill, color;
+      if (pct > 0.6) { fill = '#34d399'; color = 'rgba(52,211,153,.7)'; }
+      else if (pct > 0.3) { fill = '#22d3ee'; color = 'rgba(34,211,238,.5)'; }
+      else if (pct > 0.1) { fill = '#fbbf24'; color = 'rgba(251,191,36,.4)'; }
+      else if (pct > 0) { fill = '#334155'; color = 'rgba(51,65,85,.5)'; }
+      else { fill = 'rgba(255,255,255,.04)'; color = 'transparent'; }
+      cells += `<rect x="${(h - start) * 22}" y="0" width="20" height="16" rx="2" fill="${fill}" opacity="0.85"><title>${String(h).padStart(2,'0')}:00 — ${hourlyAgg[h]} calls</title></rect>`;
+    }
+    rows.push(`<g transform="translate(0,${rows.length * 22})">${cells}<text x="268" y="12" fill="#64748b" font-size="10" font-family="system-ui,sans-serif">${label}</text></g>`);
+  }
+  return `<div class="heatmap-section"><div class="card-header" style="margin-bottom:8px"><span class="card-dot" style="background:#34d399"></span>Hourly Activity</div><svg viewBox="0 0 300 50" class="heatmap-svg">${rows.join('')}</svg></div>`;
+}
+
+function renderDailyChart(dailyAgg) {
+  const entries = Object.entries(dailyAgg).sort(([a], [b]) => a.localeCompare(b));
+  if (entries.length < 3) return '';
+  const last30 = entries.slice(-30);
+  const maxVal = Math.max(...last30.map(([, v]) => v), 1);
+  const barW = 280 / last30.length;
+
+  const bars = last30.map(([date, val], i) => {
+    const h = Math.max(Math.round(val / maxVal * 80), 1);
+    return `<rect x="${i * barW}" y="${80 - h}" width="${Math.max(barW - 1, 1)}" height="${h}" fill="#8b5cf6" opacity="0.7" rx="1"><title>${date}: ${fmtTok(val)} tokens</title></rect>`;
+  }).join('');
+
+  const labels = last30.filter((_, i) => i % 7 === 0 || i === last30.length - 1).map(([date], i) => {
+    const idx = i === 0 ? 0 : last30.length - 1;
+    return `<text x="${idx * barW}" y="96" fill="#475569" font-size="8" font-family="system-ui,sans-serif">${date.substring(5)}</text>`;
+  }).join('');
+
+  return `<div class="heatmap-section"><div class="card-header" style="margin-bottom:8px"><span class="card-dot" style="background:#a78bfa"></span>Daily Token Usage</div><svg viewBox="0 0 280 100" class="heatmap-svg">${bars}${labels}</svg></div>`;
+}
+
+// ── Token Breakdown Card ─────────────────────────
+function tokenBreakdownCard(details, total, totalInput, totalOutput, totalCacheRead, totalCacheCreation) {
+  return `<div class="card">
+    <div class="card-header"><span class="card-dot" style="background:#f97316"></span>Token Breakdown</div>
+    <div class="token-chart">
+      <div class="token-total"><span class="token-big">${fmtTok(total)}</span><span class="token-label">Total tokens (incl. cache)</span></div>
+      <div class="token-legend">
+        <span class="tl-input">■ Input: ${fmtTok(totalInput)}</span>
+        <span class="tl-output">■ Output: ${fmtTok(totalOutput)}</span>
+        <span class="tl-cache">■ Cache Read: ${fmtTok(totalCacheRead)}</span>
+        <span class="tl-cache-w">■ Cache Write: ${fmtTok(totalCacheCreation)}</span>
+      </div>
+      ${Object.entries(details).map(([name, d]) => {
+        const pct = Math.round(d.totalBilled / total * 100);
+        return `<div class="token-agent">
+          <div class="ta-name">${esc(name)}</div>
+          <div class="ta-bar-bg"><div class="ta-bar-fill" style="width:${pct}%"></div></div>
+          <div class="ta-detail">
+            <span>In: ${fmtTok(d.input)}</span>
+            <span>Out: ${fmtTok(d.output)}</span>
+            <span>CR: ${fmtTok(d.cacheRead)}</span>
+            ${d.cacheCreation ? `<span>CW: ${fmtTok(d.cacheCreation)}</span>` : ''}
+          </div>
+        </div>`;
+      }).join('')}
+    </div>
+  </div>`;
 }
 
 // ── SVG: Aura Ring ──────────────────────────────
@@ -199,7 +381,6 @@ function radarChart(dimensions) {
   const angleStep = (2 * Math.PI) / n;
   const startAngle = -Math.PI / 2;
 
-  // Grid rings
   const rings = [20, 40, 60, 80, 100].map(pct => {
     const r = maxR * pct / 100;
     const pts = Array.from({ length: n }, (_, i) => {
@@ -209,13 +390,11 @@ function radarChart(dimensions) {
     return `<polygon points="${pts}" fill="none" stroke="rgba(148,163,184,.08)" stroke-width="1"/>`;
   }).join('');
 
-  // Axis lines
   const axes = Array.from({ length: n }, (_, i) => {
     const a = startAngle + i * angleStep;
     return `<line x1="${cx}" y1="${cy}" x2="${cx + maxR * Math.cos(a)}" y2="${cy + maxR * Math.sin(a)}" stroke="rgba(148,163,184,.06)" stroke-width="1"/>`;
   }).join('');
 
-  // Data polygon
   const dataPts = DIM_META.map((d, i) => {
     const ds = dimensions[d.id];
     const v = ds?.status === 'scored' ? ds.score : 0;
@@ -224,7 +403,6 @@ function radarChart(dimensions) {
     return `${cx + r * Math.cos(a)},${cy + r * Math.sin(a)}`;
   }).join(' ');
 
-  // Labels
   const labels = DIM_META.map((d, i) => {
     const a = startAngle + i * angleStep;
     const lr = maxR + 28;
@@ -269,19 +447,16 @@ function agentConstellation(agents) {
     const angle = (2 * Math.PI * i / n) - Math.PI / 2;
     const x = cx + orbitR * Math.cos(angle);
     const y = cy + orbitR * Math.sin(angle);
-    const isDeep = a.depth === 'deep';
-    const isConfig = a.depth === 'config';
+    const style = DEPTH_STYLES[a.depth] || DEPTH_STYLES.detect;
 
-    const nodeColor = isDeep ? '#34d399' : isConfig ? '#fbbf24' : '#475569';
-    const glowFilter = isDeep ? 'filter="url(#agentGlow)"' : '';
-    const opacity = isDeep ? 1 : isConfig ? 0.8 : 0.5;
-    const lineOpacity = isDeep ? 0.4 : isConfig ? 0.2 : 0.08;
+    const glowFilter = style.glow ? 'filter="url(#agentGlow)"' : '';
+    const depthLabel = a.depth === 'unsupported' ? 'unsupported' : a.depth;
 
     return `
-      <line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}" stroke="${nodeColor}" stroke-width="1" opacity="${lineOpacity}"/>
-      <circle cx="${x}" cy="${y}" r="6" fill="${nodeColor}" opacity="${opacity}" ${glowFilter}/>
-      <text x="${x}" y="${y + 22}" text-anchor="middle" fill="${nodeColor}" font-size="11" font-weight="${isDeep ? 600 : 400}" font-family="system-ui,sans-serif" opacity="${opacity}">${esc(a.source)}</text>
-      <text x="${x}" y="${y + 34}" text-anchor="middle" fill="#475569" font-size="9" font-family="system-ui,sans-serif">${a.depth}</text>
+      <line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}" stroke="${style.color}" stroke-width="1" opacity="${style.lineOpacity}"/>
+      <circle cx="${x}" cy="${y}" r="6" fill="${style.color}" opacity="${style.opacity}" ${glowFilter}/>
+      <text x="${x}" y="${y + 22}" text-anchor="middle" fill="${style.color}" font-size="11" font-weight="${style.fontWeight}" font-family="system-ui,sans-serif" opacity="${style.opacity}">${esc(a.source)}</text>
+      <text x="${x}" y="${y + 34}" text-anchor="middle" fill="#475569" font-size="9" font-family="system-ui,sans-serif">${depthLabel}</text>
     `;
   }).join('');
 
@@ -329,6 +504,10 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans
   background-size:48px 48px}
 .container{position:relative;z-index:1;max-width:1180px;margin:0 auto;padding:40px 24px}
 
+/* ── Warning Banner ── */
+.warning-banner{background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.3);border-radius:10px;padding:10px 16px;margin-bottom:16px;color:#fbbf24;font-size:13px}
+.warning-banner code{background:rgba(251,191,36,.15);padding:2px 6px;border-radius:4px;font-family:'SF Mono',monospace;font-size:12px}
+
 /* ── Hero Card ── */
 .hero-card{background:linear-gradient(145deg,rgba(22,27,54,.85),rgba(10,14,32,.92));
   border:1px solid rgba(148,163,184,.16);border-radius:20px;padding:32px 40px;margin-bottom:24px;
@@ -342,9 +521,16 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans
 .hero-subtitle{font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:8px}
 .hero-type{font-size:32px;font-weight:800;color:#f1f5f9;margin-bottom:12px;
   background:linear-gradient(135deg,#f1f5f9,#94a3b8);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.hero-meta{display:flex;align-items:center;gap:12px;margin-bottom:24px}
+.hero-meta{display:flex;align-items:center;gap:12px;margin-bottom:16px}
 .rank-pill{display:inline-block;padding:3px 12px;border-radius:12px;background:rgba(139,92,246,.2);color:#a78bfa;font-size:12px;font-weight:600}
 .hero-conf{font-size:12px;color:#64748b}
+.hero-scores{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+.score-pill{display:flex;flex-direction:column;align-items:center;padding:8px 16px;border-radius:10px;min-width:72px}
+.score-pill.aura{background:rgba(139,92,246,.15);border:1px solid rgba(139,92,246,.3)}
+.score-pill.power{background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.25)}
+.score-pill.agent{background:rgba(34,211,238,.12);border:1px solid rgba(34,211,238,.25)}
+.sp-val{font-size:22px;font-weight:800;color:#e2e8f0}
+.sp-label{font-size:9px;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin-top:2px}
 .hero-weapons{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .weapon{display:flex;flex-direction:column;gap:2px;padding:8px 12px;background:rgba(255,255,255,.03);border-radius:8px;border:1px solid rgba(255,255,255,.05)}
 .weapon-label{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px}
@@ -380,6 +566,31 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans
 
 /* ── Constellation ── */
 .constellation{width:100%;max-width:500px;height:auto;margin:0 auto;display:block}
+.unsupported-list{margin-top:12px}
+.unsupported-item{display:flex;align-items:center;gap:10px;padding:6px 12px;background:rgba(255,255,255,.02);border-radius:6px;margin-bottom:4px}
+.ui-name{font-size:13px;color:#fb7185;font-weight:500}
+.ui-badge{font-size:10px;color:#475569;background:rgba(251,113,133,.1);padding:2px 8px;border-radius:4px}
+
+/* ── Power User Evidence ── */
+.evidence-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin-bottom:20px}
+.ev-item{display:flex;flex-direction:column;gap:2px;padding:10px 12px;background:rgba(255,255,255,.03);border-radius:8px;border:1px solid rgba(255,255,255,.05)}
+.ev-label{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.4px}
+.ev-val{font-size:15px;font-weight:700;color:#e2e8f0}
+
+/* ── Token periods table ── */
+.token-periods{margin-bottom:20px;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,.06)}
+.tp-header,.tp-row{display:grid;grid-template-columns:60px repeat(5,1fr);padding:8px 12px;font-size:12px;align-items:center}
+.tp-header{background:rgba(255,255,255,.05);color:#94a3b8;font-weight:600}
+.tp-row{border-top:1px solid rgba(255,255,255,.03);color:#cbd5e1}
+.tp-row.tp-all{background:rgba(139,92,246,.08);font-weight:600}
+.tp-period{color:#64748b;font-weight:500}
+.tp-col{color:#cbd5e1}
+.tp-total{font-weight:700;color:#a78bfa}
+
+/* ── Heatmap & Charts ── */
+.heatmap-section{margin-top:16px}
+.heatmap-svg{width:100%;max-width:300px;height:auto}
+.models-section{margin-top:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 
 /* ── Stack groups ── */
 .stack-groups{display:flex;flex-direction:column;gap:16px}
@@ -388,16 +599,19 @@ body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans
 .stack-items{display:flex;flex-wrap:wrap;gap:6px}
 .stack-chip{padding:4px 10px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:6px;font-size:12px;color:#cbd5e1}
 
-/* ── Token chart ── */
+/* ── Token breakdown ── */
 .token-chart{display:flex;flex-direction:column;gap:12px}
-.token-total{display:flex;align-items:baseline;gap:8px;margin-bottom:8px}
+.token-total{display:flex;align-items:baseline;gap:8px;margin-bottom:4px}
 .token-big{font-size:28px;font-weight:800;color:#a78bfa}
 .token-label{font-size:12px;color:#64748b}
-.token-row{display:flex;align-items:center;gap:10px}
-.token-name{font-size:12px;color:#94a3b8;width:100px;flex-shrink:0}
-.token-bar-bg{flex:1;height:8px;background:rgba(255,255,255,.06);border-radius:4px;overflow:hidden}
-.token-bar-fill{height:100%;border-radius:4px;background:linear-gradient(90deg,#8b5cf6,#6366f1);transition:width .5s}
-.token-val{font-size:12px;font-weight:600;color:#a78bfa;width:60px;text-align:right}
+.token-legend{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px}
+.tl-input{color:#8b5cf6;font-size:11px}.tl-output{color:#34d399;font-size:11px}
+.tl-cache{color:#22d3ee;font-size:11px}.tl-cache-w{color:#fbbf24;font-size:11px}
+.token-agent{margin-bottom:8px}
+.ta-name{font-size:12px;color:#94a3b8;font-weight:500;margin-bottom:4px}
+.ta-bar-bg{height:8px;background:rgba(255,255,255,.06);border-radius:4px;overflow:hidden;margin-bottom:4px}
+.ta-bar-fill{height:100%;border-radius:4px;background:linear-gradient(90deg,#8b5cf6,#6366f1);transition:width .5s}
+.ta-detail{display:flex;gap:10px;font-size:10px;color:#64748b}
 
 /* ── Badge wall ── */
 .badge-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
@@ -424,9 +638,12 @@ footer{text-align:center;padding:40px 0 20px;color:#334155;font-size:12px;letter
   .hero-body{flex-direction:column;text-align:center}
   .hero-right{order:-1}
   .hero-weapons{grid-template-columns:1fr}
+  .hero-scores{justify-content:center}
   .section-grid{grid-template-columns:1fr}
   .badge-grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}
+  .evidence-grid{grid-template-columns:repeat(auto-fill,minmax(120px,1fr))}
   .container{padding:20px 16px}
+  .tp-header,.tp-row{grid-template-columns:50px repeat(5,1fr);font-size:10px}
 }
 `;
 }

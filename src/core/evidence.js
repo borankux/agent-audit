@@ -37,7 +37,7 @@ export function makeEvidence(id, source, category, depth, metrics = {}) {
     id,
     source,
     category,   // 'ai-agent' | 'runtime' | 'infra' | 'ide' | 'shell' | 'security'
-    depth,      // 'deep' | 'config' | 'detect'
+    depth,      // 'deep' | 'config' | 'detect' | 'unsupported'
     confidence: depthToConfidence(depth),
     metrics,
   };
@@ -46,6 +46,7 @@ export function makeEvidence(id, source, category, depth, metrics = {}) {
 function depthToConfidence(depth) {
   if (depth === 'deep') return CONFIDENCE.HIGH;
   if (depth === 'config') return CONFIDENCE.MEDIUM;
+  if (depth === 'unsupported') return CONFIDENCE.LOW;
   return CONFIDENCE.LOW;
 }
 

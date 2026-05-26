@@ -22,11 +22,18 @@ function boxBot(ac) { return `${PAD}${ac}└${BOX_H.repeat(BOX_W)}┘${W}`; }
 function boxRow(ac, content) { return `${PAD}${ac}│${W} ${padVis(content, INNER)} ${ac}│${W}`; }
 
 export function renderTerminal(report) {
-  const { auraScore, confidence, dimensions, developerType, badges, recommendations, evidences, sessions } = report;
+  const { auraScore, confidence, dimensions, developerType, powerScores, badges, recommendations, evidences, sessions, scanMeta } = report;
   const gc = gradeColor(auraScore);
   const now = new Date();
   const ts = now.toISOString().substring(0, 16).replace('T', ' ');
   const L = [];
+
+  // Truncation warning
+  const hasTruncation = scanMeta?.scannedAgents?.some(a => a.skipped);
+  if (hasTruncation) {
+    L.push(`  ${R}⚠ Session data truncated — usage may be undercounted. Run with --full${W}`);
+    L.push('');
+  }
 
   // ── Header ──────────────────────────────────────────
   L.push('');
@@ -47,7 +54,10 @@ export function renderTerminal(report) {
   const heroLeft = `${B}${gc} ${developerType.type}${W}`;
   L.push(`  ${heroLeft}`);
   L.push(`  ${B}${gc} ${auraScore}${W}${D}/100${W} ${bar} ${D}Confidence: ${confidence}${W}`);
-  L.push(`  ${D}Rank: ${developerType.rank}${W}`);
+  if (powerScores?.aiPowerScore !== undefined) {
+    L.push(`  ${D}AI Power: ${C}${powerScores.aiPowerScore}${W}${D}/100${W}${powerScores.evidenceCoverageScore !== undefined ? `  Evidence: ${C}${powerScores.evidenceCoverageScore}${W}${D}%${W}` : ''}`);
+  }
+  L.push(`  ${D}Rank: ${developerType.rank}${W}${developerType.primaryAgent ? `${D} · Primary: ${B}${developerType.primaryAgent}${W}` : ''}`);
   L.push('');
 
   // ── Core Signals ────────────────────────────────────
@@ -114,25 +124,30 @@ export function renderTerminal(report) {
 
   // ── Token Usage (from sessions) ─────────────────────
   if (sessions) {
-    const agg7 = { input: 0, output: 0, cache: 0 };
-    const agg30 = { input: 0, output: 0, cache: 0 };
-    const aggAll = { input: 0, output: 0, cache: 0 };
+    const agg7 = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
+    const agg30 = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
+    const aggAll = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
     for (const s of Object.values(sessions)) {
       if (!s) continue;
-      for (const k of ['input', 'output', 'cache']) {
+      for (const k of ['input', 'output', 'cacheRead', 'cacheCreation']) {
         agg7[k] += s.tokens7d?.[k] || 0;
         agg30[k] += s.tokens30d?.[k] || 0;
         aggAll[k] += s.tokensAll?.[k] || 0;
       }
     }
-    const agg7t = agg7.input + agg7.output;
-    const agg30t = agg30.input + agg30.output;
-    const aggAllt = aggAll.input + aggAll.output;
+    const agg7t = agg7.input + agg7.output + agg7.cacheRead + agg7.cacheCreation;
+    const agg30t = agg30.input + agg30.output + agg30.cacheRead + agg30.cacheCreation;
+    const aggAllt = aggAll.input + aggAll.output + aggAll.cacheRead + aggAll.cacheCreation;
     if (aggAllt > 0) {
       const colW = 10;
-      L.push(`  ${B}── Token Usage ──────────────────────────────────────${W}`);
+      L.push(`  ${B}── Token Usage (incl. cache) ─────────────────────────${W}`);
       L.push(`  ${D}${' '.repeat(10)}${'7d'.padStart(colW)}${'30d'.padStart(colW)}${'All'.padStart(colW)}${W}`);
-      for (const [label, k7, k30, ka] of [['Input', agg7.input, agg30.input, aggAll.input], ['Output', agg7.output, agg30.output, aggAll.output]]) {
+      for (const [label, k7, k30, ka] of [
+        ['Input', agg7.input, agg30.input, aggAll.input],
+        ['Output', agg7.output, agg30.output, aggAll.output],
+        ['Cache R', agg7.cacheRead, agg30.cacheRead, aggAll.cacheRead],
+        ['Cache W', agg7.cacheCreation, agg30.cacheCreation, aggAll.cacheCreation],
+      ]) {
         L.push(`  ${D}${label.padEnd(8)}${W}${SKY}${fmtTok(k7).padStart(colW)}${W}${GOLD}${fmtTok(k30).padStart(colW)}${W}${LIME}${fmtTok(ka).padStart(colW)}${W}`);
       }
       L.push(`  ${D}${'─'.repeat(8)}${'─'.repeat(colW)}${'─'.repeat(colW)}${'─'.repeat(colW)}${W}`);

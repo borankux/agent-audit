@@ -82,7 +82,7 @@ export function scanConfig() {
   return r;
 }
 
-export async function scanSessions(days = 30) {
+export async function scanSessions(days = 30, opts = {}) {
   const r = {
     sessionCount: 0,
     activeDays: new Set(),
@@ -93,9 +93,9 @@ export async function scanSessions(days = 30) {
     toolCalls: 0,
     first: null,
     last: null,
-    tokens7d: { input: 0, output: 0, cache: 0 },
-    tokens30d: { input: 0, output: 0, cache: 0 },
-    tokensAll: { input: 0, output: 0, cache: 0 },
+    tokens7d: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    tokens30d: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    tokensAll: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, totalBilled: 0, totalContext: 0 },
     dailyTokens: {},
     hourlyCounts: new Array(24).fill(0),
     models: new Set(),
@@ -105,6 +105,9 @@ export async function scanSessions(days = 30) {
     buildCommands: 0,
     lintCommands: 0,
     typecheckCommands: 0,
+    scannedLines: 0,
+    skippedLines: false,
+    parseErrors: 0,
   };
 
   const pdir = join(CLAUDE_DIR, 'projects');
@@ -118,7 +121,7 @@ export async function scanSessions(days = 30) {
   r.sessionCount = files.length;
 
   let scanned = 0;
-  const MAX_LINES = 800_000;
+  const MAX_LINES = opts.maxLines ?? 800_000;
 
   const VERIFY_COMMANDS = /test|spec|jest|mocha|pytest|vitest|cargo test|go test|npm test|pnpm test/;
   const BUILD_COMMANDS = /build|compile|make|cargo build|go build|npm run build|pnpm build/;
@@ -133,11 +136,11 @@ export async function scanSessions(days = 30) {
 
       const rl = createInterface({ input: createReadStream(jf, 'utf8'), crlfDelay: Infinity });
       for await (const line of rl) {
-        if (scanned >= MAX_LINES) break;
+        if (scanned >= MAX_LINES) { r.skippedLines = true; break; }
         scanned++;
         if (!line) continue;
         let msg;
-        try { msg = JSON.parse(line); } catch { continue; }
+        try { msg = JSON.parse(line); } catch { r.parseErrors++; continue; }
 
         if (msg.type !== 'assistant') continue;
         const message = msg.message || {};
@@ -150,12 +153,31 @@ export async function scanSessions(days = 30) {
         if (usage && typeof usage === 'object') {
           const inp = usage.input_tokens || 0;
           const out = usage.output_tokens || 0;
-          const cache = usage.cache_read_input_tokens || 0;
+          const cacheRead = usage.cache_read_input_tokens || 0;
+          const cacheCreation = usage.cache_creation_input_tokens || 0;
+
           r.tokensAll.input += inp;
           r.tokensAll.output += out;
-          r.tokensAll.cache += cache;
-          if (mt >= cutoff30) { r.tokens30d.input += inp; r.tokens30d.output += out; r.tokens30d.cache += cache; }
-          if (mt >= cutoff7)  { r.tokens7d.input += inp; r.tokens7d.output += out; r.tokens7d.cache += cache; }
+          r.tokensAll.cacheRead += cacheRead;
+          r.tokensAll.cacheCreation += cacheCreation;
+          // total_billed-like: sum all token types
+          r.tokensAll.totalBilled += inp + out + cacheRead + cacheCreation;
+          // total_context: input + cache_read (what the model saw)
+          r.tokensAll.totalContext += inp + cacheRead;
+
+          if (mt >= cutoff30) {
+            r.tokens30d.input += inp; r.tokens30d.output += out;
+            r.tokens30d.cacheRead += cacheRead; r.tokens30d.cacheCreation += cacheCreation;
+          }
+          if (mt >= cutoff7) {
+            r.tokens7d.input += inp; r.tokens7d.output += out;
+            r.tokens7d.cacheRead += cacheRead; r.tokens7d.cacheCreation += cacheCreation;
+          }
+
+          // Daily tokens
+          if (mt) {
+            r.dailyTokens[mt] = (r.dailyTokens[mt] || 0) + inp + out + cacheRead;
+          }
         }
 
         const ts = msg.timestamp || '';
@@ -170,14 +192,14 @@ export async function scanSessions(days = 30) {
         for (const blk of content) {
           if (!blk || blk.type !== 'tool_use') continue;
           const n = blk.name || '';
-          const inp = blk.input || {};
+          const inp2 = blk.input || {};
           r.tools.add(n);
           r.toolCalls++;
 
           if (n === 'Edit' || n === 'Write') r.fileEdits++;
           if (n === 'Bash') {
             r.commandRuns++;
-            const cmd = inp.command || '';
+            const cmd = inp2.command || '';
             if (VERIFY_COMMANDS.test(cmd)) r.testCommands++;
             if (BUILD_COMMANDS.test(cmd)) r.buildCommands++;
             if (LINT_COMMANDS.test(cmd)) r.lintCommands++;
@@ -185,10 +207,10 @@ export async function scanSessions(days = 30) {
           }
 
           if (n === 'Skill') {
-            const sk = inp.skill || '';
+            const sk = inp2.skill || '';
             if (sk) r.skills.add(sk);
           } else if (n === 'Task' || n === 'Agent') {
-            const at = inp.subagent_type || inp.agent_type || 'general';
+            const at = inp2.subagent_type || inp2.agent_type || 'general';
             r.agentTypes.add(at);
           } else if (n.startsWith('mcp__')) {
             const parts = n.split('__');
@@ -199,6 +221,7 @@ export async function scanSessions(days = 30) {
     } catch {}
   }
 
+  r.scannedLines = scanned;
   r.activeDays = r.activeDays.size;
   return r;
 }
@@ -213,7 +236,7 @@ export function toEvidence(cfg, ses) {
     toolCalls: makeMetric('toolCalls', 'Tool calls', { value: ses?.toolCalls || 0, status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
     fileEdits: makeMetric('fileEdits', 'File edits', { value: ses?.fileEdits || 0, status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
     commandRuns: makeMetric('commandRuns', 'Commands run', { value: ses?.commandRuns || 0, status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
-    tokensUsed: makeMetric('tokensUsed', 'Tokens used', { value: (ses?.tokensAll?.input || 0) + (ses?.tokensAll?.output || 0), status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
+    tokensUsed: makeMetric('tokensUsed', 'Tokens used', { value: (ses?.tokensAll?.input || 0) + (ses?.tokensAll?.output || 0) + (ses?.tokensAll?.cacheRead || 0) + (ses?.tokensAll?.cacheCreation || 0), status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
     toolsUsed: makeMetric('toolsUsed', 'Unique tools', { value: ses?.tools?.size || 0, status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
     skillsInvoked: makeMetric('skillsInvoked', 'Skills invoked', { value: ses?.skills?.size || 0, status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
     agentTypes: makeMetric('agentTypes', 'Agent types', { value: ses?.agentTypes?.size || 0, status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),

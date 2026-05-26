@@ -15,24 +15,26 @@ export async function showConsent(agents) {
 
   console.log(`
   ${B}╭───────────────────────────────────────────────────────╮${W}
-  ${B}│${W}${B}     Coding Agent Proficiency Analyzer             ${W}    ${B}│${W}
-  ${B}│${W}${D}     Assess your AI-assisted coding skills          ${W}    ${B}│${W}
+  ${B}│${W}${B}     DevAura — Developer Environment Profiler       ${W}    ${B}│${W}
+  ${B}│${W}${D}     Your dev machine tells the truth               ${W}    ${B}│${W}
   ${B}╰───────────────────────────────────────────────────────╯${W}
 
   ${C}Detected agents:${W}
 ${agentLines}
 
   ${C}What will be scanned:${W}
-    ${G}✓${W} Configuration files (MCP servers, plugins, hooks)
+    ${G}✓${W} Development environment (runtimes, IDEs, shell, infra)
+    ${G}✓${W} AI agent configurations (MCP servers, plugins, hooks)
     ${G}✓${W} Session statistics (tool usage, frequency, tokens)
     ${G}✓${W} Custom skills & agents (${D}names only, not contents${W})
+    ${G}✓${W} Security hygiene (API key exposure, dangerous configs)
 
   ${R}What will NOT be collected:${W}
     ${R}✗${W} Code, file contents, or conversation text
     ${R}✗${W} Project names or directory structures
     ${R}✗${W} Nothing is uploaded — everything stays on this machine
 
-  ${D}The report is safe to share with employers/recruiters.${W}
+  ${D}Designed for sharing after review.${W}
 `);
 
   const answer = await askYesNo("Run the scan?");

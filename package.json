@@ -1,9 +1,10 @@
 {
-  "name": "agent-audit",
-  "version": "1.0.0",
-  "description": "Audit your coding agent proficiency — Claude Code, Codex CLI, Gemini CLI, and more",
+  "name": "devaura",
+  "version": "0.1.0",
+  "description": "Your dev machine tells the truth — developer environment & AI workflow profiler",
   "bin": {
-    "agent-audit": "./bin/agent-audit.js"
+    "devaura": "./bin/devaura.js",
+    "agent-audit": "./bin/devaura.js"
   },
   "type": "module",
   "engines": {
@@ -15,12 +16,14 @@
   ],
   "keywords": [
     "cli",
-    "audit",
+    "developer-profile",
+    "ai-workflow",
+    "aura-score",
     "claude-code",
     "codex",
-    "gemini",
+    "cursor",
     "coding-agent",
-    "proficiency"
+    "devaura"
   ],
   "license": "MIT"
 }

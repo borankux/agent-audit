@@ -1,8 +1,8 @@
-import { readFileSync, readdirSync, statSync, existsSync } from 'fs';
-import { createReadStream } from 'fs';
+import { readFileSync, readdirSync, statSync, existsSync, createReadStream } from 'fs';
 import { createInterface } from 'readline';
 import { join } from 'path';
 import { homedir } from 'os';
+import { makeEvidence, makeMetric, STATUS, CONFIDENCE } from '../core/evidence.js';
 
 const HOME = homedir();
 const CLAUDE_DIR = join(HOME, '.claude');
@@ -66,8 +66,7 @@ export function scanConfig() {
     try {
       r.skills = readdirSync(skillsDir, { withFileTypes: true })
         .filter(d => d.isDirectory())
-        .map(d => d.name)
-        .sort();
+        .map(d => d.name).sort();
     } catch {}
   }
 
@@ -100,6 +99,12 @@ export async function scanSessions(days = 30) {
     dailyTokens: {},
     hourlyCounts: new Array(24).fill(0),
     models: new Set(),
+    fileEdits: 0,
+    commandRuns: 0,
+    testCommands: 0,
+    buildCommands: 0,
+    lintCommands: 0,
+    typecheckCommands: 0,
   };
 
   const pdir = join(CLAUDE_DIR, 'projects');
@@ -114,6 +119,11 @@ export async function scanSessions(days = 30) {
 
   let scanned = 0;
   const MAX_LINES = 800_000;
+
+  const VERIFY_COMMANDS = /test|spec|jest|mocha|pytest|vitest|cargo test|go test|npm test|pnpm test/;
+  const BUILD_COMMANDS = /build|compile|make|cargo build|go build|npm run build|pnpm build/;
+  const LINT_COMMANDS = /lint|eslint|prettier|flake8|black|cargo clippy|golangci-lint/;
+  const TYPECHECK_COMMANDS = /tsc|typecheck|pyright|mypy|cargo check/;
 
   for (const jf of files) {
     try {
@@ -144,20 +154,8 @@ export async function scanSessions(days = 30) {
           r.tokensAll.input += inp;
           r.tokensAll.output += out;
           r.tokensAll.cache += cache;
-          if (mt >= cutoff30) {
-            r.tokens30d.input += inp;
-            r.tokens30d.output += out;
-            r.tokens30d.cache += cache;
-          }
-          if (mt >= cutoff7) {
-            r.tokens7d.input += inp;
-            r.tokens7d.output += out;
-            r.tokens7d.cache += cache;
-          }
-          if (!r.dailyTokens[mt]) r.dailyTokens[mt] = { input: 0, output: 0, cache: 0 };
-          r.dailyTokens[mt].input += inp;
-          r.dailyTokens[mt].output += out;
-          r.dailyTokens[mt].cache += cache;
+          if (mt >= cutoff30) { r.tokens30d.input += inp; r.tokens30d.output += out; r.tokens30d.cache += cache; }
+          if (mt >= cutoff7)  { r.tokens7d.input += inp; r.tokens7d.output += out; r.tokens7d.cache += cache; }
         }
 
         const ts = msg.timestamp || '';
@@ -175,6 +173,17 @@ export async function scanSessions(days = 30) {
           const inp = blk.input || {};
           r.tools.add(n);
           r.toolCalls++;
+
+          if (n === 'Edit' || n === 'Write') r.fileEdits++;
+          if (n === 'Bash') {
+            r.commandRuns++;
+            const cmd = inp.command || '';
+            if (VERIFY_COMMANDS.test(cmd)) r.testCommands++;
+            if (BUILD_COMMANDS.test(cmd)) r.buildCommands++;
+            if (LINT_COMMANDS.test(cmd)) r.lintCommands++;
+            if (TYPECHECK_COMMANDS.test(cmd)) r.typecheckCommands++;
+          }
+
           if (n === 'Skill') {
             const sk = inp.skill || '';
             if (sk) r.skills.add(sk);
@@ -194,33 +203,48 @@ export async function scanSessions(days = 30) {
   return r;
 }
 
-// helpers
+// Convert to evidence model
+export function toEvidence(cfg, ses) {
+  const detected = !!ses && ses.sessionCount > 0;
+  return makeEvidence('claude-code', 'Claude Code', 'ai-agent', detected ? 'deep' : 'config', {
+    activeAgents: makeMetric('activeAgents', 'Active agent', { value: detected ? 1 : 0, status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
+    aiSessions: makeMetric('aiSessions', 'Sessions', { value: ses?.sessionCount || 0, status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
+    activeDays: makeMetric('activeDays', 'Active days', { value: ses?.activeDays || 0, status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
+    toolCalls: makeMetric('toolCalls', 'Tool calls', { value: ses?.toolCalls || 0, status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
+    fileEdits: makeMetric('fileEdits', 'File edits', { value: ses?.fileEdits || 0, status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
+    commandRuns: makeMetric('commandRuns', 'Commands run', { value: ses?.commandRuns || 0, status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
+    tokensUsed: makeMetric('tokensUsed', 'Tokens used', { value: (ses?.tokensAll?.input || 0) + (ses?.tokensAll?.output || 0), status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
+    toolsUsed: makeMetric('toolsUsed', 'Unique tools', { value: ses?.tools?.size || 0, status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
+    skillsInvoked: makeMetric('skillsInvoked', 'Skills invoked', { value: ses?.skills?.size || 0, status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
+    agentTypes: makeMetric('agentTypes', 'Agent types', { value: ses?.agentTypes?.size || 0, status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
+    mcpServersUsed: makeMetric('mcpServersUsed', 'MCP servers used', { value: ses?.mcpServers?.size || 0, status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
+    customRules: makeMetric('customRules', 'Custom instructions', { value: cfg.hasCustomInstructions, status: cfg.hasCustomInstructions ? STATUS.EVALUATED : STATUS.NOT_DETECTED, confidence: CONFIDENCE.HIGH }),
+    mcpServers: makeMetric('mcpServers', 'MCP servers', { value: cfg.mcpServers.length, status: cfg.mcpServers.length ? STATUS.EVALUATED : STATUS.NOT_DETECTED, confidence: CONFIDENCE.HIGH }),
+    customSkills: makeMetric('customSkills', 'Custom skills', { value: cfg.skills.length, status: cfg.skills.length ? STATUS.EVALUATED : STATUS.NOT_DETECTED, confidence: CONFIDENCE.HIGH }),
+    customAgents: makeMetric('customAgents', 'Custom agents', { value: cfg.agents.length, status: cfg.agents.length ? STATUS.EVALUATED : STATUS.NOT_DETECTED, confidence: CONFIDENCE.HIGH }),
+    hooksConfigured: makeMetric('hooksConfigured', 'Hooks', { value: cfg.hooks.length, status: cfg.hooks.length ? STATUS.EVALUATED : STATUS.NOT_DETECTED, confidence: CONFIDENCE.HIGH }),
+    testCommands: makeMetric('testCommands', 'Test commands', { value: ses?.testCommands || 0, status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
+    buildCommands: makeMetric('buildCommands', 'Build commands', { value: ses?.buildCommands || 0, status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
+    lintCommands: makeMetric('lintCommands', 'Lint commands', { value: ses?.lintCommands || 0, status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
+    typecheckCommands: makeMetric('typecheckCommands', 'Typecheck commands', { value: ses?.typecheckCommands || 0, status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
+    recentActivity: makeMetric('recentActivity', 'Recent activity', { value: (ses?.tokens7d?.input || 0) + (ses?.tokens7d?.output || 0) > 0, status: STATUS.EVALUATED, confidence: CONFIDENCE.HIGH }),
+  });
+}
 
+// helpers
 function walkJsonl(dir) {
   const results = [];
   try {
     const entries = readdirSync(dir, { withFileTypes: true });
     for (const e of entries) {
       const full = join(dir, e.name);
-      if (e.isDirectory()) {
-        results.push(...walkJsonl(full));
-      } else if (e.name.endsWith('.jsonl') && !e.name.startsWith('agent-')) {
-        results.push(full);
-      }
+      if (e.isDirectory()) results.push(...walkJsonl(full));
+      else if (e.name.endsWith('.jsonl') && !e.name.startsWith('agent-')) results.push(full);
     }
   } catch {}
   return results;
 }
-
-function daysAgo(now, n) {
-  const d = new Date(now);
-  d.setDate(d.getDate() - n);
-  return d;
-}
-
-function dateStr(d) {
-  return d.toISOString().substring(0, 10);
-}
-
+function daysAgo(now, n) { const d = new Date(now); d.setDate(d.getDate() - n); return d; }
+function dateStr(d) { return d.toISOString().substring(0, 10); }
 function minDate(a, b) { return a < b ? a : b; }
 function maxDate(a, b) { return a > b ? a : b; }

@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, statSync, existsSync, createReadStream } from 'fs';
+import { readFileSync, readdirSync, statSync, existsSync, createReadStream, openSync, closeSync } from 'fs';
 import { createInterface } from 'readline';
 import { join } from 'path';
 import { homedir } from 'os';
@@ -49,39 +49,39 @@ export async function scanSessions() {
 
   for (const jf of files) {
     if (scanned >= MAX_LINES) break;
+    let fd;
+    try { fd = openSync(jf, 'r'); } catch { continue; }
     try {
       const mt = dateStr(new Date(statSync(jf).mtime));
       r.first = r.first ? minDate(r.first, mt) : mt; r.last = r.last ? maxDate(r.last, mt) : mt;
-      const stream = createReadStream(jf, 'utf8');
+      const stream = createReadStream(jf, { fd, encoding: 'utf8', autoClose: false });
+      stream.on('error', () => {});
       const rl = createInterface({ input: stream, crlfDelay: Infinity });
       let lastTokenUsage = null;
-      try {
-        for await (const line of rl) {
-          if (scanned >= MAX_LINES) break; scanned++;
-          if (!line) continue;
-          let msg; try { msg = JSON.parse(line); } catch { continue; }
-          const type = msg.type; const payload = msg.payload || {};
-          if (mt >= cutoff30) r.activeDays.add(mt);
-          if (type === 'event_msg' && payload.type === 'token_count' && payload.info) {
-            const usage = payload.info.total_token_usage || payload.info.last_token_usage;
-            if (usage && usage.input_tokens !== undefined) lastTokenUsage = { input: usage.input_tokens || 0, output: usage.output_tokens || 0, cache: usage.cached_input_tokens || 0 };
-          }
-          if (type === 'response_item' && payload.type === 'function_call') { r.toolCalls++; r.tools.add(payload.name || 'unknown'); }
-          if (type === 'event_msg' && payload.type === 'exec_command_end') { r.toolCalls++; r.tools.add('exec_command'); r.commandRuns++; if (VERIFY_CMD.test(payload.command || '')) r.testCommands++; if (BUILD_CMD.test(payload.command || '')) r.buildCommands++; }
-          if (type === 'session_meta' && payload.cli_version) r.models.add(`codex@${payload.cli_version}`);
-          const ts = msg.ts || msg.timestamp || '';
-          if (ts && typeof ts === 'string' && ts.length >= 16) { try { const h = parseInt(ts.substring(11, 13), 10); if (h >= 0 && h < 24) r.hourlyCounts[h]++; } catch {} }
+      for await (const line of rl) {
+        if (scanned >= MAX_LINES) break; scanned++;
+        if (!line) continue;
+        let msg; try { msg = JSON.parse(line); } catch { continue; }
+        const type = msg.type; const payload = msg.payload || {};
+        if (mt >= cutoff30) r.activeDays.add(mt);
+        if (type === 'event_msg' && payload.type === 'token_count' && payload.info) {
+          const usage = payload.info.total_token_usage || payload.info.last_token_usage;
+          if (usage && usage.input_tokens !== undefined) lastTokenUsage = { input: usage.input_tokens || 0, output: usage.output_tokens || 0, cache: usage.cached_input_tokens || 0 };
         }
-      } finally {
-        rl.close();
-        stream.destroy();
+        if (type === 'response_item' && payload.type === 'function_call') { r.toolCalls++; r.tools.add(payload.name || 'unknown'); }
+        if (type === 'event_msg' && payload.type === 'exec_command_end') { r.toolCalls++; r.tools.add('exec_command'); r.commandRuns++; if (VERIFY_CMD.test(payload.command || '')) r.testCommands++; if (BUILD_CMD.test(payload.command || '')) r.buildCommands++; }
+        if (type === 'session_meta' && payload.cli_version) r.models.add(`codex@${payload.cli_version}`);
+        const ts = msg.ts || msg.timestamp || '';
+        if (ts && typeof ts === 'string' && ts.length >= 16) { try { const h = parseInt(ts.substring(11, 13), 10); if (h >= 0 && h < 24) r.hourlyCounts[h]++; } catch {} }
       }
       if (lastTokenUsage) {
         r.tokensAll.input += lastTokenUsage.input; r.tokensAll.output += lastTokenUsage.output; r.tokensAll.cache += lastTokenUsage.cache;
         if (mt >= cutoff30) { r.tokens30d.input += lastTokenUsage.input; r.tokens30d.output += lastTokenUsage.output; r.tokens30d.cache += lastTokenUsage.cache; }
         if (mt >= cutoff7) { r.tokens7d.input += lastTokenUsage.input; r.tokens7d.output += lastTokenUsage.output; r.tokens7d.cache += lastTokenUsage.cache; }
       }
-    } catch {}
+    } catch {} finally {
+      try { closeSync(fd); } catch {}
+    }
   }
   r.activeDays = r.activeDays.size;
   return r;

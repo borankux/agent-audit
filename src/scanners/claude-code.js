@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, statSync, existsSync, createReadStream } from 'fs';
+import { readFileSync, readdirSync, statSync, existsSync, createReadStream, openSync, closeSync } from 'fs';
 import { createInterface } from 'readline';
 import { join } from 'path';
 import { homedir } from 'os';
@@ -130,20 +130,26 @@ export async function scanSessions(days = 30, opts = {}) {
 
   for (const jf of files) {
     if (scanned >= MAX_LINES) { r.skippedLines = true; break; }
+    let fd;
+    try {
+      fd = openSync(jf, 'r');
+    } catch { continue; }
+
     try {
       const mt = dateStr(new Date(statSync(jf).mtime));
       r.first = r.first ? minDate(r.first, mt) : mt;
       r.last = r.last ? maxDate(r.last, mt) : mt;
 
-      const stream = createReadStream(jf, 'utf8');
+      const stream = createReadStream(jf, { fd, encoding: 'utf8', autoClose: false });
+      stream.on('error', () => {});
       const rl = createInterface({ input: stream, crlfDelay: Infinity });
-      try {
-        for await (const line of rl) {
-          if (scanned >= MAX_LINES) { r.skippedLines = true; break; }
-          scanned++;
-          if (!line) continue;
-          let msg;
-          try { msg = JSON.parse(line); } catch { r.parseErrors++; continue; }
+
+      for await (const line of rl) {
+        if (scanned >= MAX_LINES) { r.skippedLines = true; break; }
+        scanned++;
+        if (!line) continue;
+        let msg;
+        try { msg = JSON.parse(line); } catch { r.parseErrors++; continue; }
 
         if (msg.type !== 'assistant') continue;
         const message = msg.message || {};
@@ -163,9 +169,7 @@ export async function scanSessions(days = 30, opts = {}) {
           r.tokensAll.output += out;
           r.tokensAll.cacheRead += cacheRead;
           r.tokensAll.cacheCreation += cacheCreation;
-          // total_billed-like: sum all token types
           r.tokensAll.totalBilled += inp + out + cacheRead + cacheCreation;
-          // total_context: input + cache_read (what the model saw)
           r.tokensAll.totalContext += inp + cacheRead;
 
           if (mt >= cutoff30) {
@@ -177,7 +181,6 @@ export async function scanSessions(days = 30, opts = {}) {
             r.tokens7d.cacheRead += cacheRead; r.tokens7d.cacheCreation += cacheCreation;
           }
 
-          // Daily tokens
           if (mt) {
             r.dailyTokens[mt] = (r.dailyTokens[mt] || 0) + inp + out + cacheRead;
           }
@@ -221,11 +224,9 @@ export async function scanSessions(days = 30, opts = {}) {
           }
         }
       }
-      } finally {
-        rl.close();
-        stream.destroy();
-      }
-    } catch {}
+    } catch {} finally {
+      try { closeSync(fd); } catch {}
+    }
   }
 
   r.scannedLines = scanned;

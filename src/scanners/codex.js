@@ -48,26 +48,33 @@ export async function scanSessions() {
   const BUILD_CMD = /build|compile|make|cargo build|go build/;
 
   for (const jf of files) {
+    if (scanned >= MAX_LINES) break;
     try {
       const mt = dateStr(new Date(statSync(jf).mtime));
       r.first = r.first ? minDate(r.first, mt) : mt; r.last = r.last ? maxDate(r.last, mt) : mt;
-      const rl = createInterface({ input: createReadStream(jf, 'utf8'), crlfDelay: Infinity });
+      const stream = createReadStream(jf, 'utf8');
+      const rl = createInterface({ input: stream, crlfDelay: Infinity });
       let lastTokenUsage = null;
-      for await (const line of rl) {
-        if (scanned >= MAX_LINES) break; scanned++;
-        if (!line) continue;
-        let msg; try { msg = JSON.parse(line); } catch { continue; }
-        const type = msg.type; const payload = msg.payload || {};
-        if (mt >= cutoff30) r.activeDays.add(mt);
-        if (type === 'event_msg' && payload.type === 'token_count' && payload.info) {
-          const usage = payload.info.total_token_usage || payload.info.last_token_usage;
-          if (usage && usage.input_tokens !== undefined) lastTokenUsage = { input: usage.input_tokens || 0, output: usage.output_tokens || 0, cache: usage.cached_input_tokens || 0 };
+      try {
+        for await (const line of rl) {
+          if (scanned >= MAX_LINES) break; scanned++;
+          if (!line) continue;
+          let msg; try { msg = JSON.parse(line); } catch { continue; }
+          const type = msg.type; const payload = msg.payload || {};
+          if (mt >= cutoff30) r.activeDays.add(mt);
+          if (type === 'event_msg' && payload.type === 'token_count' && payload.info) {
+            const usage = payload.info.total_token_usage || payload.info.last_token_usage;
+            if (usage && usage.input_tokens !== undefined) lastTokenUsage = { input: usage.input_tokens || 0, output: usage.output_tokens || 0, cache: usage.cached_input_tokens || 0 };
+          }
+          if (type === 'response_item' && payload.type === 'function_call') { r.toolCalls++; r.tools.add(payload.name || 'unknown'); }
+          if (type === 'event_msg' && payload.type === 'exec_command_end') { r.toolCalls++; r.tools.add('exec_command'); r.commandRuns++; if (VERIFY_CMD.test(payload.command || '')) r.testCommands++; if (BUILD_CMD.test(payload.command || '')) r.buildCommands++; }
+          if (type === 'session_meta' && payload.cli_version) r.models.add(`codex@${payload.cli_version}`);
+          const ts = msg.ts || msg.timestamp || '';
+          if (ts && typeof ts === 'string' && ts.length >= 16) { try { const h = parseInt(ts.substring(11, 13), 10); if (h >= 0 && h < 24) r.hourlyCounts[h]++; } catch {} }
         }
-        if (type === 'response_item' && payload.type === 'function_call') { r.toolCalls++; r.tools.add(payload.name || 'unknown'); }
-        if (type === 'event_msg' && payload.type === 'exec_command_end') { r.toolCalls++; r.tools.add('exec_command'); r.commandRuns++; if (VERIFY_CMD.test(payload.command || '')) r.testCommands++; if (BUILD_CMD.test(payload.command || '')) r.buildCommands++; }
-        if (type === 'session_meta' && payload.cli_version) r.models.add(`codex@${payload.cli_version}`);
-        const ts = msg.ts || msg.timestamp || '';
-        if (ts && typeof ts === 'string' && ts.length >= 16) { try { const h = parseInt(ts.substring(11, 13), 10); if (h >= 0 && h < 24) r.hourlyCounts[h]++; } catch {} }
+      } finally {
+        rl.close();
+        stream.destroy();
       }
       if (lastTokenUsage) {
         r.tokensAll.input += lastTokenUsage.input; r.tokensAll.output += lastTokenUsage.output; r.tokensAll.cache += lastTokenUsage.cache;

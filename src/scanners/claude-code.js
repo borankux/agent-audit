@@ -129,18 +129,21 @@ export async function scanSessions(days = 30, opts = {}) {
   const TYPECHECK_COMMANDS = /tsc|typecheck|pyright|mypy|cargo check/;
 
   for (const jf of files) {
+    if (scanned >= MAX_LINES) { r.skippedLines = true; break; }
     try {
       const mt = dateStr(new Date(statSync(jf).mtime));
       r.first = r.first ? minDate(r.first, mt) : mt;
       r.last = r.last ? maxDate(r.last, mt) : mt;
 
-      const rl = createInterface({ input: createReadStream(jf, 'utf8'), crlfDelay: Infinity });
-      for await (const line of rl) {
-        if (scanned >= MAX_LINES) { r.skippedLines = true; break; }
-        scanned++;
-        if (!line) continue;
-        let msg;
-        try { msg = JSON.parse(line); } catch { r.parseErrors++; continue; }
+      const stream = createReadStream(jf, 'utf8');
+      const rl = createInterface({ input: stream, crlfDelay: Infinity });
+      try {
+        for await (const line of rl) {
+          if (scanned >= MAX_LINES) { r.skippedLines = true; break; }
+          scanned++;
+          if (!line) continue;
+          let msg;
+          try { msg = JSON.parse(line); } catch { r.parseErrors++; continue; }
 
         if (msg.type !== 'assistant') continue;
         const message = msg.message || {};
@@ -217,6 +220,10 @@ export async function scanSessions(days = 30, opts = {}) {
             if (parts.length >= 2) r.mcpServers.add(parts[1]);
           }
         }
+      }
+      } finally {
+        rl.close();
+        stream.destroy();
       }
     } catch {}
   }
